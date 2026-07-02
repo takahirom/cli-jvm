@@ -8,8 +8,8 @@ application {
 }
 
 group = "io.github.takahirom"
-// Overridable from CI at release time: -PclijvmVersion=1.2.3 (defaults to the dev version otherwise).
-version = (findProperty("clijvmVersion") as String?) ?: "0.2.0"
+// Release versions come from the git tag via CI (-PclijvmVersion=<tag>); local builds are "dev".
+version = (findProperty("clijvmVersion") as String?) ?: "0.0.0-dev"
 
 repositories {
     mavenCentral()
