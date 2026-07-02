@@ -29,6 +29,13 @@ tasks.distTar {
     archiveExtension = "tar.gz"
 }
 
+// Stamp the build version into the jar manifest so `clijvm --version` can report the release tag.
+tasks.jar {
+    manifest {
+        attributes("Implementation-Version" to project.version)
+    }
+}
+
 tasks.test {
     useJUnitPlatform()
     // Integration tests attach to a spawned child JVM; give them room and their own reporting.

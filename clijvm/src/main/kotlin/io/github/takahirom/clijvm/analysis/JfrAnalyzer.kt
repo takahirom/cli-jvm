@@ -33,6 +33,9 @@ object JfrAnalyzer {
         val selfCounts = HashMap<String, Int>()
         val representativeStacks = HashMap<String, List<String>>()
         val threadCounts = HashMap<String, Int>()
+        // Per-thread self-method counts and representative stacks, for the --thread drill-down.
+        val threadSelfCounts = HashMap<String, HashMap<String, Int>>()
+        val threadStacks = HashMap<String, HashMap<String, List<String>>>()
         val collapsedCounts = LinkedHashMap<String, Int>()
         val collapsedFrames = HashMap<String, List<String>>()
 
@@ -77,6 +80,8 @@ object JfrAnalyzer {
                             ?: recordedThread?.osName
                             ?: "(unknown thread)"
                         threadCounts.merge(thread, 1, Int::plus)
+                        threadSelfCounts.getOrPut(thread) { HashMap() }.merge(topKey, 1, Int::plus)
+                        threadStacks.getOrPut(thread) { HashMap() }.putIfAbsent(topKey, leafFirst)
 
                         val rootFirst = leafFirst.asReversed()
                         val collapsedKey = rootFirst.joinToString(";")
@@ -135,6 +140,24 @@ object JfrAnalyzer {
                 )
             }
 
+        // Per-thread method breakdowns, aligned to the hot threads (the ones a user can drill into).
+        val threadBreakdowns = hotThreads.map { t ->
+            val counts = threadSelfCounts[t.name].orEmpty()
+            val stacks = threadStacks[t.name].orEmpty()
+            val methods = counts.entries
+                .sortedByDescending { it.value }
+                .take(topN)
+                .map { (method, samples) ->
+                    HotMethod(
+                        method = method,
+                        selfPct = percentage(samples, t.samples),
+                        samples = samples,
+                        stack = stacks[method].orEmpty(),
+                    )
+                }
+            ThreadBreakdown(name = t.name, totalSamples = t.samples, topMethods = methods)
+        }
+
         val collapsed = collapsedCounts.entries
             .sortedByDescending { it.value }
             .map { (key, samples) -> CollapsedStack(collapsedFrames.getValue(key), samples) }
@@ -157,6 +180,7 @@ object JfrAnalyzer {
             totalSamples = totalSamples,
             hotMethods = hotMethods,
             hotThreads = hotThreads,
+            threadBreakdowns = threadBreakdowns,
             gc = GcStats(count = gcCount, totalPauseMs = gcTotalMs, maxPauseMs = gcMaxMs),
             collapsed = collapsed,
             allocation = allocation,

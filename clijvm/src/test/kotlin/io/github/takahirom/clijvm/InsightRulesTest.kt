@@ -4,10 +4,12 @@ import io.github.takahirom.clijvm.analysis.AllocationSite
 import io.github.takahirom.clijvm.analysis.AllocationStats
 import io.github.takahirom.clijvm.analysis.ClassLoadingStats
 import io.github.takahirom.clijvm.analysis.GcStats
+import io.github.takahirom.clijvm.analysis.HotMethod
 import io.github.takahirom.clijvm.analysis.HotThread
 import io.github.takahirom.clijvm.analysis.InsightRules
 import io.github.takahirom.clijvm.analysis.ProfileResult
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class InsightRulesTest {
@@ -16,6 +18,7 @@ class InsightRulesTest {
         durationMs: Long = 30_000,
         totalSamples: Int = 1000,
         gc: GcStats = GcStats(0, 0.0, 0.0),
+        hotMethods: List<HotMethod> = emptyList(),
         hotThreads: List<HotThread> = listOf(HotThread("main", 100.0, 1000)),
         allocation: AllocationStats? = null,
         classLoading: ClassLoadingStats? = null,
@@ -25,7 +28,7 @@ class InsightRulesTest {
         mainClass = "T",
         durationMs = durationMs,
         totalSamples = totalSamples,
-        hotMethods = emptyList(),
+        hotMethods = hotMethods,
         hotThreads = hotThreads,
         gc = gc,
         collapsed = emptyList(),
@@ -102,6 +105,60 @@ class InsightRulesTest {
             ),
         )
         assertTrue(insights.hints.any { it.contains("multiple Android SDK levels") }, "${insights.hints}")
+    }
+
+    @Test
+    fun `idle warning blames GC when GC dominates a low-sample recording`() {
+        // 58 samples over 18s = idle-rate, but GC ate 40% of the wall clock.
+        val insights = InsightRules.derive(
+            baseline(
+                totalSamples = 58,
+                durationMs = 18_000,
+                gc = GcStats(count = 50, totalPauseMs = 7_200.0, maxPauseMs = 400.0),
+            ),
+        )
+        assertTrue(insights.warnings.any { it.contains("Low sample rate is likely due to GC pauses") }, "${insights.warnings}")
+        assertFalse(insights.warnings.any { it.contains("mostly idle") }, "${insights.warnings}")
+    }
+
+    @Test
+    fun `idle warning blames idleness when GC is negligible`() {
+        val insights = InsightRules.derive(baseline(totalSamples = 58, durationMs = 18_000))
+        assertTrue(insights.warnings.any { it.contains("mostly idle") }, "${insights.warnings}")
+        assertFalse(insights.warnings.any { it.contains("due to GC pauses") }, "${insights.warnings}")
+    }
+
+    @Test
+    fun `hints on coverage agent overhead`() {
+        val insights = InsightRules.derive(
+            baseline(
+                hotMethods = listOf(
+                    HotMethod("org.jacoco.agent.rt.internal.Offline.getProbes", 12.0, 120, emptyList()),
+                    HotMethod("com.example.Foo.bar", 3.0, 30, emptyList()),
+                ),
+            ),
+        )
+        assertTrue(insights.hints.any { it.contains("Coverage agent overhead") }, "${insights.hints}")
+    }
+
+    @Test
+    fun `hints on image encoding workload`() {
+        val insights = InsightRules.derive(
+            baseline(
+                hotMethods = listOf(
+                    HotMethod("com.example.Encoder.write", 8.0, 80, listOf("javax.imageio.ImageIO.write")),
+                ),
+            ),
+        )
+        assertTrue(insights.hints.any { it.contains("Image encoding accounts for") }, "${insights.hints}")
+    }
+
+    @Test
+    fun `no coverage or image hint when those frames are absent`() {
+        val insights = InsightRules.derive(
+            baseline(hotMethods = listOf(HotMethod("com.example.Foo.bar", 90.0, 900, emptyList()))),
+        )
+        assertFalse(insights.hints.any { it.contains("Coverage agent") || it.contains("Image encoding") }, "${insights.hints}")
     }
 
     @Test

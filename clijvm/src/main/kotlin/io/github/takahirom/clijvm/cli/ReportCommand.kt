@@ -10,13 +10,25 @@ import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.types.int
 import io.github.takahirom.clijvm.analysis.JfrAnalyzer
 import io.github.takahirom.clijvm.analysis.ProfileResult
+import io.github.takahirom.clijvm.render.OutputFormat
 import io.github.takahirom.clijvm.render.RenderOptions
 import io.github.takahirom.clijvm.render.Renderers
 import io.github.takahirom.clijvm.render.ReportView
+import io.github.takahirom.clijvm.util.Json
+import io.github.takahirom.clijvm.util.jsonArray
+import io.github.takahirom.clijvm.util.jsonInt
+import io.github.takahirom.clijvm.util.jsonObject
+import io.github.takahirom.clijvm.util.jsonString
+import io.github.takahirom.clijvm.util.jsonStringOrNull
+import io.github.takahirom.clijvm.util.readRecordingMeta
 import io.github.takahirom.clijvm.util.recordingsDir
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlin.io.path.extension
+import kotlin.io.path.fileSize
 import kotlin.io.path.getLastModifiedTime
 import kotlin.io.path.isRegularFile
 import kotlin.io.path.listDirectoryEntries
@@ -27,12 +39,14 @@ class ReportCommand : CliktCommand(
     help = """
         Re-analyse a saved .jfr recording in a chosen format.
 
+        First, 'clijvm report --list' shows which recordings exist (file, pid, mainClass) so you pick the right one.
+
         Reports are layered so an AI can read cheaply, then drill in:
           1. clijvm report --last --digest       # takeaways only (warnings + hints + headline numbers)
           2. clijvm report --last                 # top 5 hot methods/sites, shallow stacks
           3. clijvm report --last --method 3      # one hot method with its full stack
 
-        The #N labels printed in step 2 are the indices you pass to --method / --site in step 3.
+        The #N labels printed in step 2 are the indices you pass to --method / --site / --thread.
     """.trimIndent(),
 ) {
     private val last by option("--last", help = "Use the newest recording in ~/.clijvm/recordings.").flag()
@@ -40,6 +54,10 @@ class ReportCommand : CliktCommand(
     private val format by option("--format", help = "Output format.").outputFormat()
     private val output by option("--output", help = "Write the report to a file instead of stdout.")
 
+    private val listRecordings by option(
+        "--list",
+        help = "List saved recordings (file, timestamp, pid, mainClass, size), newest first, then exit.",
+    ).flag()
     private val digest by option(
         "--digest",
         help = "Layer 0 — takeaways only: warnings, hints, and headline numbers. No stacks or lists.",
@@ -60,21 +78,37 @@ class ReportCommand : CliktCommand(
         "--site",
         help = "Layer 2 — drill into one allocation site by its #N index, printing its full stack.",
     ).int()
+    private val threadIndex by option(
+        "--thread",
+        help = "Layer 2 — drill into one hot thread by its #N index, showing its own top methods.",
+    ).int()
     private val full by option(
         "--full",
         help = "Escape hatch — render everything with full stacks (same as --top 0 --max-stack-depth 0).",
     ).flag()
 
     override fun run() {
+        if (listRecordings) {
+            writeReport(renderRecordingList(), output)
+            return
+        }
+
         val file = when {
             last -> newestRecording()
                 ?: throw CliktError("No recordings found in $recordingsDir. Run 'clijvm cpu <target>' first.")
             fileArg != null -> Path.of(fileArg!!)
-            else -> throw CliktError("Specify a .jfr file or use --last.")
+            else -> throw CliktError("Specify a .jfr file, use --last, or list saved recordings with --list.")
         }
         if (!Files.isReadable(file)) throw CliktError("Cannot read recording: $file")
 
-        val result = JfrAnalyzer.analyze(file, pid = pidFromFilename(file))
+        // Prefer the sidecar (main class, partial flag) when present; fall back to the filename pid.
+        val meta = readRecordingMeta(file)
+        val result = JfrAnalyzer.analyze(
+            file = file,
+            pid = meta?.pid ?: pidFromFilename(file),
+            mainClass = meta?.mainClass,
+            partial = meta?.partial ?: false,
+        )
         val options = buildRenderOptions(result)
         // A saved recording carries both CPU and allocation data, so report shows the full view.
         writeReport(Renderers.render(result, format, ReportView.FULL, options), output)
@@ -84,6 +118,7 @@ class ReportCommand : CliktCommand(
     private fun buildRenderOptions(result: ProfileResult): RenderOptions {
         methodIndex?.let { checkDrillIndex("--method", "hot methods", it, result.hotMethods.size) }
         siteIndex?.let { checkDrillIndex("--site", "allocation sites", it, result.allocation?.topSites?.size ?: 0) }
+        threadIndex?.let { checkDrillIndex("--thread", "hot threads", it, result.hotThreads.size) }
         val effectiveTop = if (full) 0 else top
         val effectiveDepth = if (full) 0 else maxStackDepth
         return RenderOptions(
@@ -92,15 +127,68 @@ class ReportCommand : CliktCommand(
             digest = digest,
             methodIndex = methodIndex,
             siteIndex = siteIndex,
+            threadIndex = threadIndex,
         )
     }
 
-    private fun newestRecording(): Path? {
-        if (!Files.isDirectory(recordingsDir)) return null
+    /** Renders the saved-recordings inventory as a table (or JSON when `--format json`). */
+    private fun renderRecordingList(): String {
+        val recordings = savedRecordings()
+        if (format == OutputFormat.JSON) {
+            return jsonArray(recordings.map { r ->
+                jsonObject(
+                    "file" to jsonString(r.file.toString()),
+                    "timestamp" to jsonString(r.timestamp),
+                    "pid" to (r.pid?.let { jsonInt(it) } ?: Json.Literal("null")),
+                    "mainClass" to jsonStringOrNull(r.mainClass),
+                    "sizeBytes" to jsonInt(r.sizeBytes),
+                )
+            }).render()
+        }
+        if (recordings.isEmpty()) return "No recordings found in $recordingsDir."
+        val pidWidth = maxOf(3, recordings.maxOf { (it.pid?.toString() ?: "-").length })
+        return buildString {
+            appendLine("%-19s  %-${pidWidth}s  %-9s  %s".format("TIMESTAMP", "PID", "SIZE", "MAIN CLASS / FILE"))
+            recordings.forEach { r ->
+                val pid = r.pid?.toString() ?: "-"
+                // Truncate the label so a daemon's full classpath doesn't blow up the table (JSON keeps it whole).
+                val label = truncateDisplayName(r.mainClass ?: r.file.fileName.toString(), full = false).first
+                appendLine(
+                    "%-19s  %-${pidWidth}s  %-9s  %s".format(
+                        r.timestamp, pid, Renderers.formatBytes(r.sizeBytes), label,
+                    )
+                )
+            }
+        }.trimEnd()
+    }
+
+    private data class RecordingInfo(
+        val file: Path,
+        val timestamp: String,
+        val pid: Long?,
+        val mainClass: String?,
+        val sizeBytes: Long,
+    )
+
+    private fun savedRecordings(): List<RecordingInfo> {
+        if (!Files.isDirectory(recordingsDir)) return emptyList()
+        val stamp = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault())
         return recordingsDir.listDirectoryEntries()
             .filter { it.isRegularFile() && it.extension == "jfr" }
-            .maxByOrNull { it.getLastModifiedTime().toMillis() }
+            .sortedByDescending { it.getLastModifiedTime().toMillis() }
+            .map { file ->
+                val meta = readRecordingMeta(file)
+                RecordingInfo(
+                    file = file.toAbsolutePath(),
+                    timestamp = stamp.format(Instant.ofEpochMilli(file.getLastModifiedTime().toMillis())),
+                    pid = meta?.pid ?: pidFromFilename(file),
+                    mainClass = meta?.mainClass,
+                    sizeBytes = file.fileSize(),
+                )
+            }
     }
+
+    private fun newestRecording(): Path? = savedRecordings().firstOrNull()?.file
 
     /** Recovers the pid from a `<yyyyMMdd-HHmmss>-<pid>.jfr` filename, if present. */
     private fun pidFromFilename(file: Path): Long? =

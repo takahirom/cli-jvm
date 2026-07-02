@@ -8,6 +8,7 @@ import io.github.takahirom.clijvm.analysis.GcStats
 import io.github.takahirom.clijvm.analysis.HotMethod
 import io.github.takahirom.clijvm.analysis.HotThread
 import io.github.takahirom.clijvm.analysis.ProfileResult
+import io.github.takahirom.clijvm.analysis.ThreadBreakdown
 import io.github.takahirom.clijvm.cli.ReportCommand
 import io.github.takahirom.clijvm.cli.checkDrillIndex
 import io.github.takahirom.clijvm.render.OutputFormat
@@ -257,5 +258,33 @@ class RenderersTest {
         assertTrue(help.contains("1. clijvm report --last --digest"), help)
         assertTrue(help.contains("2. clijvm report --last"), help)
         assertTrue(help.contains("3. clijvm report --last --method 3"), help)
+        assertTrue(help.contains("clijvm report --list"), help)
+    }
+
+    @Test
+    fun `thread drill-down shows that thread's own top methods at max-stack-depth`() {
+        val withThreads = deepResult().copy(
+            threadBreakdowns = listOf(
+                ThreadBreakdown(
+                    "main", 100,
+                    listOf(
+                        HotMethod("pkg.A.a", 60.0, 60, (1..10).map { "a.frame$it" }),
+                        HotMethod("pkg.B.b", 40.0, 40, (1..10).map { "b.frame$it" }),
+                    ),
+                ),
+            ),
+        )
+        val json = Renderers.render(withThreads, OutputFormat.JSON, options = RenderOptions(threadIndex = 1, maxStackDepth = 2))
+        assertTrue(json.contains("\"thread\""), json)
+        assertTrue(json.contains("\"name\": \"main\""), json)
+        assertTrue(json.contains("pkg.A.a"), json)
+        // Thread drill respects --max-stack-depth (unlike method/site which show full stacks).
+        assertTrue(json.contains("\"stackTruncated\": true"), json)
+        assertFalse(json.contains("\"hotMethods\": [\n"), json) // cpu.hotMethods empty in a thread drill
+
+        val summary = Renderers.render(withThreads, OutputFormat.SUMMARY, ReportView.FULL, RenderOptions(threadIndex = 1, maxStackDepth = 2))
+        assertTrue(summary.contains("Hot thread #1: main"), summary)
+        assertTrue(summary.contains("pkg.A.a"), summary)
+        assertTrue(summary.contains("more frames"), summary)
     }
 }

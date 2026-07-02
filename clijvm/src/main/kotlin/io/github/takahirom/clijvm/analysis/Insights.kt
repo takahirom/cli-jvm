@@ -31,6 +31,18 @@ object InsightRules {
     /** Matches Robolectric per-SDK worker threads such as "SDK 33 Main Thread". */
     private val SDK_THREAD_REGEX = Regex("""SDK\s*\d+""")
 
+    /** Frame markers of coverage-agent instrumentation (JaCoCo). */
+    private val COVERAGE_FRAME_MARKERS = listOf("org.jacoco", "CRC64", "Instrumenter")
+
+    /** Frame markers of image encoding, typical of screenshot-testing workloads. */
+    private val IMAGE_ENCODING_FRAME_MARKERS = listOf(
+        "javax.imageio", "BufferedImage", "WebP", "PNGImageWriter", "PNGImageEncoder",
+        "NeuQuant", "AnimatedGifEncoder",
+    )
+
+    /** Self% share of hot methods above which a workload signature is worth flagging. */
+    const val HOTSPOT_SHARE_PCT = 5.0
+
     fun derive(result: ProfileResult): Insights {
         val warnings = mutableListOf<String>()
         val hints = mutableListOf<String>()
@@ -47,30 +59,40 @@ object InsightRules {
             warnings += "No CPU samples were captured; hotspot data is unavailable."
         }
 
+        val gcShare = if (result.durationMs > 0) result.gc.totalPauseMs / result.durationMs else 0.0
+
         val seconds = result.durationMs / 1000.0
         if (seconds > 0 && result.totalSamples > 0) {
             val samplesPerSec = result.totalSamples / seconds
             if (samplesPerSec < IDLE_SAMPLES_PER_SEC) {
-                warnings += String.format(
-                    Locale.US,
-                    "Target looks mostly idle (~%.1f CPU samples/sec); hotspots may not reflect real work.",
-                    samplesPerSec,
-                )
+                // JFR execution samples can't fire during stop-the-world GC pauses, so a GC-heavy
+                // run looks "idle". When GC explains the low rate, say so instead of blaming idleness.
+                warnings += if (gcShare >= GC_PAUSE_SHARE) {
+                    String.format(
+                        Locale.US,
+                        "Low sample rate is likely due to GC pauses (GC accounted for %.0f%% of the " +
+                            "recording), not an idle target.",
+                        gcShare * 100,
+                    )
+                } else {
+                    String.format(
+                        Locale.US,
+                        "Target looks mostly idle (~%.1f CPU samples/sec); hotspots may not reflect real work.",
+                        samplesPerSec,
+                    )
+                }
             }
         }
 
         // --- GC pressure hint ---
-        if (result.durationMs > 0) {
-            val gcShare = result.gc.totalPauseMs / result.durationMs
-            if (gcShare >= GC_PAUSE_SHARE) {
-                hints += String.format(
-                    Locale.US,
-                    "GC pauses account for %.0f%% of the recording (%.0f ms); consider heap sizing " +
-                        "or reducing allocation.",
-                    gcShare * 100,
-                    result.gc.totalPauseMs,
-                )
-            }
+        if (gcShare >= GC_PAUSE_SHARE) {
+            hints += String.format(
+                Locale.US,
+                "GC pauses account for %.0f%% of the recording (%.0f ms); consider heap sizing " +
+                    "or reducing allocation.",
+                gcShare * 100,
+                result.gc.totalPauseMs,
+            )
         }
 
         // --- class-loading hint ---
@@ -100,6 +122,40 @@ object InsightRules {
                 "each builds its own sandbox. Narrow @Config sdk to reduce setup cost."
         }
 
+        // --- coverage-agent overhead (JaCoCo) in hot methods ---
+        val coverageShare = hotMethodShareMatching(result, COVERAGE_FRAME_MARKERS)
+        if (coverageShare >= HOTSPOT_SHARE_PCT) {
+            hints += String.format(
+                Locale.US,
+                "Coverage agent overhead detected (~%.0f%% of samples); consider disabling coverage " +
+                    "when profiling.",
+                coverageShare,
+            )
+        }
+
+        // --- image encoding (screenshot testing) in hot methods ---
+        val imageShare = hotMethodShareMatching(result, IMAGE_ENCODING_FRAME_MARKERS)
+        if (imageShare >= HOTSPOT_SHARE_PCT) {
+            hints += String.format(
+                Locale.US,
+                "Image encoding accounts for ~%.0f%% of samples (screenshot testing workload).",
+                imageShare,
+            )
+        }
+
         return Insights(warnings, hints)
     }
+
+    /**
+     * Summed self% of hot methods whose name or representative stack contains any of [markers].
+     * Each hot method is counted once even if several markers match.
+     */
+    private fun hotMethodShareMatching(result: ProfileResult, markers: List<String>): Double =
+        result.hotMethods
+            .filter { m ->
+                markers.any { marker ->
+                    m.method.contains(marker) || m.stack.any { it.contains(marker) }
+                }
+            }
+            .sumOf { it.selfPct }
 }

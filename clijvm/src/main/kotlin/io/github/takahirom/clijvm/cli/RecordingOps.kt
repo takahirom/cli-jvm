@@ -13,7 +13,9 @@ import io.github.takahirom.clijvm.render.ReportView
 import io.github.takahirom.clijvm.session.Session
 import io.github.takahirom.clijvm.session.SessionEntry
 import io.github.takahirom.clijvm.session.SessionStore
+import io.github.takahirom.clijvm.util.RecordingMeta
 import io.github.takahirom.clijvm.util.recordingsDir
+import io.github.takahirom.clijvm.util.writeRecordingMeta
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -70,9 +72,14 @@ fun CliktCommand.profileSynchronously(
             recorder.dump(recordingFile)
             recorder.stop()
             val durationMs = System.currentTimeMillis() - startedAt
+            writeRecordingMeta(
+                recordingFile,
+                RecordingMeta(pid, process.displayName, startedAt, partial = false),
+            )
             val result = JfrAnalyzer.analyze(recordingFile, pid, process.displayName, durationMs)
             echo("Recording saved to $recordingFile")
             writeReport(Renderers.render(result, format, view, renderOptions), output)
+            echoDrillGuidance(recordingFile, format, output)
         }
     }
 
@@ -85,6 +92,17 @@ fun CliktCommand.profileSynchronously(
     } finally {
         runCatching { Runtime.getRuntime().removeShutdownHook(shutdownHook) }
     }
+}
+
+/**
+ * Prints one self-teaching line pointing at the drill-down commands, in the same style as
+ * `report`. Only for a summary printed to stdout — it must not corrupt json/collapsed or a file.
+ */
+private fun CliktCommand.echoDrillGuidance(recording: Path, format: OutputFormat, output: String?) {
+    if (format != OutputFormat.SUMMARY || output != null) return
+    echo(
+        "Drill in: clijvm report $recording --method N (see #N above), or --digest for takeaways."
+    )
 }
 
 /** Starts a background recording (with dump-on-exit salvage) and persists its session. */
@@ -152,6 +170,10 @@ fun CliktCommand.doStop(
     session.dumpOnExitPath?.let { runCatching { Files.deleteIfExists(Path.of(it)) } }
 
     val durationMs = System.currentTimeMillis() - session.startEpochMs
+    writeRecordingMeta(
+        recordingFile,
+        RecordingMeta(pid, session.mainClass, session.startEpochMs, partial = false),
+    )
     val result = JfrAnalyzer.analyze(recordingFile, pid, session.mainClass, durationMs)
     echo("Recording saved to $recordingFile")
     writeReport(Renderers.render(result, format, view), output)
@@ -176,6 +198,10 @@ private fun CliktCommand.salvagePartial(
     val salvaged = newRecordingPath(session.pid)
     Files.move(onExit, salvaged, StandardCopyOption.REPLACE_EXISTING)
     echo("Target pid ${session.pid} had already exited; salvaged its dump-on-exit recording.")
+    writeRecordingMeta(
+        salvaged,
+        RecordingMeta(session.pid, session.mainClass, session.startEpochMs, partial = true),
+    )
     // Let the analyzer derive the duration from the recording's own timespan.
     val result = JfrAnalyzer.analyze(salvaged, session.pid, session.mainClass, partial = true)
     echo("Recording saved to $salvaged")

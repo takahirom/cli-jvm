@@ -16,6 +16,17 @@ data class HotThread(
     val samples: Int,
 )
 
+/**
+ * Per-thread hot-method breakdown, used only by the `--thread` drill-down. Kept out of the default
+ * render paths so it never bloats summary/json/collapsed output.
+ */
+data class ThreadBreakdown(
+    val name: String,
+    val totalSamples: Int,
+    /** Hottest methods WITHIN this thread; [HotMethod.selfPct] is relative to this thread. */
+    val topMethods: List<HotMethod>,
+)
+
 /** Garbage collection pause statistics over the recording. */
 data class GcStats(
     val count: Int,
@@ -67,6 +78,8 @@ data class ProfileResult(
     val totalSamples: Int,
     val hotMethods: List<HotMethod>,
     val hotThreads: List<HotThread>,
+    /** Per-thread hot-method breakdowns for `--thread`; empty unless captured. */
+    val threadBreakdowns: List<ThreadBreakdown> = emptyList(),
     val gc: GcStats,
     val collapsed: List<CollapsedStack>,
     /** Allocation profile, or null when the recording contains no allocation events. */

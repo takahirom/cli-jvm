@@ -45,9 +45,11 @@ data class RenderOptions(
     val methodIndex: Int? = null,
     /** Layer 2: 1-based index of the single allocation site to drill into with its full stack. */
     val siteIndex: Int? = null,
+    /** Layer 2: 1-based index of the hot thread to drill into (its own top methods). */
+    val threadIndex: Int? = null,
 ) {
     /** True when a single node is being drilled into (Layer 2). */
-    val isDrillDown: Boolean get() = methodIndex != null || siteIndex != null
+    val isDrillDown: Boolean get() = methodIndex != null || siteIndex != null || threadIndex != null
 
     companion object {
         const val DEFAULT_TOP = 5
@@ -223,6 +225,19 @@ object Renderers {
             appendLine("  full stack (${site.stack.size} frames, leaf-first):")
             site.stack.forEach { appendLine("      $it") }
         }
+        options.threadIndex?.let { idx ->
+            val breakdown = result.threadBreakdowns[idx - 1]
+            appendLine("Hot thread #$idx: ${breakdown.name}  (${breakdown.totalSamples} samples)")
+            appendLine("Top methods within this thread (self%):")
+            if (breakdown.topMethods.isEmpty()) {
+                appendLine("  (no samples attributed to this thread)")
+            } else {
+                breakdown.topMethods.forEachIndexed { i, m ->
+                    appendLine(String.format(Locale.US, "  #%-2d %5.1f%%  %s", i + 1, m.selfPct, m.method))
+                    appendStack(m.stack, options.maxStackDepth)
+                }
+            }
+        }
     }
 
     private fun StringBuilder.appendClassLoading(result: ProfileResult) {
@@ -290,10 +305,11 @@ object Renderers {
                 result.classLoading?.let { entries.add("classLoading" to classLoadingJson(result)) }
             }
 
-            // Layer 2: exactly the one drilled node, full stack, nothing else in the big arrays.
+            // Layer 2: exactly the one drilled node, nothing else in the big arrays.
             options.isDrillDown -> {
                 entries.add(0, "layer" to jsonString("drill-down"))
                 val method = options.methodIndex?.let { idx ->
+                    // Method/site drills show the FULL stack (depth ignored).
                     listOf(hotMethodJson(result.hotMethods[idx - 1], idx, maxDepth = 0))
                 } ?: emptyList()
                 entries.add(
@@ -302,6 +318,22 @@ object Renderers {
                         "hotThreads" to jsonArray(emptyList()),
                     )
                 )
+                // Thread drill shows the thread's own top methods, at --max-stack-depth.
+                options.threadIndex?.let { idx ->
+                    val breakdown = result.threadBreakdowns[idx - 1]
+                    entries.add(
+                        "thread" to jsonObject(
+                            "index" to jsonInt(idx),
+                            "name" to jsonString(breakdown.name),
+                            "totalSamples" to jsonInt(breakdown.totalSamples),
+                            "topMethods" to jsonArray(
+                                breakdown.topMethods.mapIndexed { i, m ->
+                                    hotMethodJson(m, i + 1, options.maxStackDepth)
+                                }
+                            ),
+                        )
+                    )
+                }
                 entries.add("gc" to gcJson(result))
                 result.allocation?.let { allocation ->
                     val site = options.siteIndex?.let { idx ->

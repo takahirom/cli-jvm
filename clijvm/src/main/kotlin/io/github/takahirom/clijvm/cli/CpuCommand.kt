@@ -35,7 +35,7 @@ class CpuCommand : CliktCommand(
     private val wait by option(
         "--wait",
         help = "Wait for a JVM whose name contains this substring to appear, then profile it. " +
-            "Recommended for short-lived Gradle test workers.",
+            "Recommended for short-lived Gradle test workers, e.g. --wait GradleWorkerMain.",
     )
     private val waitTimeout by option("--wait-timeout", help = "How long to wait with --wait (default 120s).")
         .convert { runCatching { parseDuration(it) }.getOrElse { e -> fail(e.message ?: "invalid duration") } }

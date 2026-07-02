@@ -27,18 +27,28 @@ build/install/clijvm/bin/clijvm list         # run the installed launcher
 ## Commands
 
 ```
-clijvm list [--format table|json]                 # attachable JVMs; Gradle test workers are marked
+clijvm --version                                  # print the build/release version
+clijvm list [--format table|json] [--test-workers] # attachable JVMs; Gradle test workers are marked
 clijvm cpu <target> [--duration 30s]              # synchronous CPU profile, then report
 clijvm cpu start|stop|status <target>             # background recording (see below)
 clijvm memory <target> [--duration 30s]           # synchronous allocation profile
 clijvm memory start|stop|status <target>          # background recording (shares cpu's recording)
 clijvm heap <target> [--limit 20] [--format ...]  # class histogram (jcmd GC.class_histogram)
+clijvm report --list                              # inventory of saved recordings (pick one)
 clijvm report [--last | <file.jfr>] [--format ...] # re-analyse a saved recording (layered; see below)
 ```
 
 - **`<target>`** is a pid, or a case-insensitive substring of a process display name. Ambiguous
   name matches fail with the candidate list. clijvm never matches its own process.
+- **`list`** truncates long display names (e.g. the Kotlin daemon's classpath) to keep rows scannable;
+  pass **`--full`** to expand. JSON marks a shortened row with `"displayNameTruncated": true`.
+  Matching/`--wait` always use the full name. A Gradle test worker looks like
+  `…GradleWorkerMain 'Gradle Test Executor N'`; filter to just those with **`--test-workers`** and
+  attach with `--wait GradleWorkerMain`.
 - **`--format`** is `summary` (default), `json`, or `collapsed`; **`--output <file>`** writes to a file.
+- Each recording gets a `<recording>.meta.json` sidecar (pid, mainClass, startedAt, partial) so a later
+  `report` shows the real main class and remembers a salvaged `PARTIAL` recording. A missing sidecar
+  falls back to the pid embedded in the filename.
 - Every recording is saved to `~/.clijvm/recordings/<timestamp>-<pid>.jfr`, so you can re-view it in
   another format with `report` without paying to profile again.
 - **cpu and memory share one recording per process.** `settings=profile` captures both execution
@@ -65,11 +75,16 @@ drill only into what matters. `report --help` teaches the whole workflow on its 
    clijvm report --last --top 10 --format json
    ```
 3. **Layer 2 — drill-down**: `--method N` / `--site N` (the `#N` from Layer 1) print exactly that one
-   node with its **full** stack.
+   node with its **full** stack. `--thread N` drills into a hot thread, showing that thread's own top
+   methods (self% within the thread) at `--max-stack-depth`.
    ```bash
    clijvm report --last --method 3           # one hot method, full stack
    clijvm report --last --site 1             # one allocation site, full stack
+   clijvm report --last --thread 1           # one thread's own hot methods
    ```
+
+Pick the right recording first with **`clijvm report --list`** (file, timestamp, pid, mainClass, size;
+newest first; `--format json` for machines).
 
 Escape hatch: **`--full`** (equivalently `--top 0 --max-stack-depth 0`) renders everything with full
 stacks, i.e. the pre-layering behaviour.
