@@ -1,4 +1,4 @@
-# jvm-profiler-cli
+# cli-jvm
 
 **clijvm** — an AI-friendly JVM profiler CLI built on JDK Flight Recorder.
 

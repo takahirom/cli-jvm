@@ -52,7 +52,7 @@ jobs:
             In `takahirom/homebrew-repo`, set `Formula/clijvm.rb`:
 
             ```ruby
-            url "https://github.com/takahirom/jvm-profiler-cli/releases/download/${{ github.ref_name }}/clijvm-${{ github.ref_name }}.tar.gz"
+            url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/clijvm-${{ github.ref_name }}.tar.gz"
             sha256 "${{ steps.checksum.outputs.sha256 }}"
             ```
             </details>
@@ -64,7 +64,7 @@ jobs:
             echo ""
             echo "Update \`takahirom/homebrew-repo\` → \`Formula/clijvm.rb\`:"
             echo '```ruby'
-            echo 'url "https://github.com/takahirom/jvm-profiler-cli/releases/download/${{ github.ref_name }}/clijvm-${{ github.ref_name }}.tar.gz"'
+            echo 'url "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/clijvm-${{ github.ref_name }}.tar.gz"'
             echo 'sha256 "${{ steps.checksum.outputs.sha256 }}"'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
