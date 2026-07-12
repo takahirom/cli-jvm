@@ -1,6 +1,8 @@
 import java.lang.management.ManagementFactory;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -29,8 +31,12 @@ public class SingleThreadEval {
             t.setDaemon(true);
             return t;
         };
-        // Keep references alive; the executor threads block waiting for tasks.
-        Executors.newFixedThreadPool(POOL_SIZE, idleFactory);
+        // Prestart all core threads: a fixed pool spawns workers lazily, so without this the
+        // idle-pool-* threads would never exist and the scenario would lose its point
+        // (available-but-unused parallelism).
+        ThreadPoolExecutor idlePool = new ThreadPoolExecutor(
+                POOL_SIZE, POOL_SIZE, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>(), idleFactory);
+        idlePool.prestartAllCoreThreads();
 
         // All real work runs serially on this one thread.
         Thread worker = new Thread(SingleThreadEval::processSerially, "pipeline-worker");

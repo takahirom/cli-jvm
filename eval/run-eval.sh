@@ -28,6 +28,8 @@ set -euo pipefail
 EVAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SAMPLES_DIR="$EVAL_DIR/samples"
 RESULTS_DIR="$EVAL_DIR/results"
+# Wall-clock cap per agent invocation; --max-turns bounds turns, not time.
+AGENT_TIMEOUT_SECS="${AGENT_TIMEOUT_SECS:-900}"
 
 # Each scenario: "key:JavaClass:expected-grep-token"
 SCENARIOS=(
@@ -167,15 +169,24 @@ run_scenario() {
 EOF
     : > "$err_log"
   else
-    echo "invoking cold agent (cwd=$AGENT_CWD) ..."
+    echo "invoking cold agent (cwd=$AGENT_CWD, timeout=${AGENT_TIMEOUT_SECS}s) ..."
     set +e
     # Launch from an empty temp cwd so the agent cannot browse the sources.
+    # --max-turns bounds turns, not wall-clock time, so a watchdog kills a hung
+    # agent and lets cleanup and the remaining scenarios proceed (portable: no
+    # GNU `timeout` on stock macOS).
     ( cd "$AGENT_CWD" && exec claude -p "$prompt" \
         --output-format json \
         --max-turns 20 \
         --allowedTools "Bash(clijvm:*)" "Bash(jps:*)" \
-      ) > "$raw_json" 2>"$err_log"
+      ) > "$raw_json" 2>"$err_log" &
+    local agent_pid=$!
+    ( sleep "$AGENT_TIMEOUT_SECS" && kill "$agent_pid" 2>/dev/null ) &
+    local watchdog_pid=$!
+    wait "$agent_pid"
     local agent_rc=$?
+    kill "$watchdog_pid" 2>/dev/null
+    wait "$watchdog_pid" 2>/dev/null
     set -e
     if [ $agent_rc -ne 0 ]; then
       echo "warning: claude exited with code $agent_rc (see $err_log)"

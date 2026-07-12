@@ -22,7 +22,8 @@ class ThreadStatePoller(
     /** How long to wait between snapshots; derived from the recording duration by [forDuration]. */
     private val intervalMs: Long,
     /** Seam for tests: supplies one `Thread.print` snapshot on demand. */
-    private val dumpProvider: () -> String = { Jcmd.run(pid, "Thread.print") },
+    // A stalled jcmd is killed after 5s so a wedged target can't leave the daemon worker running.
+    private val dumpProvider: () -> String = { Jcmd.run(pid, "Thread.print", timeoutMs = 5_000) },
 ) {
     private val snapshots = Collections.synchronizedList(ArrayList<ParsedDump>())
     @Volatile private var running = false

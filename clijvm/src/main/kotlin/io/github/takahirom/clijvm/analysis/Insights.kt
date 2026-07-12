@@ -221,7 +221,8 @@ object InsightRules {
      * default Layer-1 axis to off-CPU. Mirrors the wait/idle conditions used for the hints above.
      */
     fun isOffCpuDominant(result: ProfileResult): Boolean {
-        if (result.durationMs <= 0 || result.totalSamples <= 0) return false
+        // Zero samples is the strongest off-CPU signal, so only a missing duration disqualifies.
+        if (result.durationMs <= 0) return false
         val samplesPerSec = result.totalSamples / (result.durationMs / 1000.0)
         val waits = result.waits ?: return false
         val maxThreadWaitMs = waits.threads.maxOfOrNull { it.totalMs } ?: 0.0

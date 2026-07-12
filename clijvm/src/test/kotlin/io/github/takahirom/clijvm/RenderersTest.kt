@@ -457,6 +457,13 @@ class RenderersTest {
     }
 
     @Test
+    fun `off-CPU axis section appears even with zero CPU samples when waits dominate`() {
+        // 0 samples/sec is the strongest off-CPU case; it must not disable the axis switch.
+        val summary = Renderers.render(offCpuResult().copy(totalSamples = 0), OutputFormat.SUMMARY, ReportView.FULL)
+        assertTrue(summary.contains("Off-CPU (dominant):"), summary)
+    }
+
+    @Test
     fun `off-CPU axis section is absent for a CPU-bound target`() {
         // The default result is 200 samples over 5s (40/s) with no waits — not off-CPU dominated.
         val summary = Renderers.render(result, OutputFormat.SUMMARY, ReportView.FULL)
