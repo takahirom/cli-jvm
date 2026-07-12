@@ -114,14 +114,14 @@ private val GUIDE_TOPICS: Map<String, String> = linkedMapOf(
 
         Recipe:
           Do not try to attach. Have the JVM record itself from the start:
-            JAVA_TOOL_OPTIONS='-XX:StartFlightRecording=filename=/tmp/rec.jfr,dumponexit=true' <command>
+            JAVA_TOOL_OPTIONS='-XX:StartFlightRecording=filename=/tmp/rec-%p.jfr,dumponexit=true' <command>
           then read the file it leaves behind:
-            clijvm report /tmp/rec.jfr
+            clijvm report /tmp/rec-<pid>.jfr
           Notes:
             - dumponexit=true guarantees a file even on a fast exit.
-            - JAVA_TOOL_OPTIONS propagates to child JVMs, so forked workers record too.
-              Concurrent JVMs racing on one filename overwrite each other; use a unique
-              name per process, e.g. filename=/tmp/rec-%p.jfr (%p expands to the pid).
+            - JAVA_TOOL_OPTIONS propagates to child JVMs, so forked workers record too;
+              %p expands to each pid, keeping concurrent recordings from overwriting
+              each other.
         Done when clijvm report prints a summary from the dumped file.
     """.trimIndent() + READING_TRAILER,
 
