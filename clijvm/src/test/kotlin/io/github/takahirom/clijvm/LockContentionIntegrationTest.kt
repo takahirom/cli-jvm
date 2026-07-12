@@ -60,18 +60,24 @@ class LockContentionIntegrationTest {
                 ledger != null,
                 "expected ContendedLedger among contended monitors but saw ${lock.monitors.map { it.className }}",
             )
-            // Under monopoly JFR emits ~no enter events, so this must come from the sampled estimate.
-            assertTrue(
-                ledger.estimated,
-                "expected the monopolized-lock contention to be a sampled estimate, but was exact",
-            )
+            // Whether the lock rotates enough for JFR to commit enter events depends on core count
+            // and scheduling, so only require the sampled estimate when JFR genuinely missed it —
+            // that is the gap the poller exists to close.
+            val jfrOnly = JfrAnalyzer.analyze(recordingFile, pid = child.pid())
+            val jfrSawIt = jfrOnly.lockContention?.monitors.orEmpty().any { it.className.contains("ContendedLedger") }
+            if (!jfrSawIt) {
+                assertTrue(
+                    ledger.estimated,
+                    "JFR recorded no enter events for ContendedLedger, so contention must be a sampled estimate",
+                )
+            }
             assertTrue(ledger.topBlockedThreads.any { it.startsWith("ledger-worker-") }, "${ledger.topBlockedThreads}")
 
-            // It must render, marked as sampled, in the --waits view.
+            // It must render in the --waits view, marked as sampled when it came from the poller.
             val waitsReport = Renderers.render(result, OutputFormat.SUMMARY, options = RenderOptions(waits = true))
             assertTrue(waitsReport.contains("Contended locks"), waitsReport)
             assertTrue(waitsReport.contains("ContendedLedger"), waitsReport)
-            assertTrue(waitsReport.contains("sampled"), waitsReport)
+            if (ledger.estimated) assertTrue(waitsReport.contains("sampled"), waitsReport)
 
             // Report-path round-trip: persist the sampled contention to the sidecar, then re-analyze
             // the saved recording the way `report --waits` does (polled data read back from meta,
@@ -88,7 +94,7 @@ class LockContentionIntegrationTest {
             val reportWaits = Renderers.render(reportResult, OutputFormat.SUMMARY, options = RenderOptions(waits = true))
             assertTrue(reportWaits.contains("Contended locks"), reportWaits)
             assertTrue(reportWaits.contains("ContendedLedger"), reportWaits)
-            assertTrue(reportWaits.contains("sampled"), reportWaits)
+            if (!jfrSawIt) assertTrue(reportWaits.contains("sampled"), reportWaits)
         } finally {
             child.destroyForcibly()
             runCatching { workDir.deleteRecursively() }
