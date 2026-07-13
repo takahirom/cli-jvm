@@ -79,7 +79,7 @@ private val GUIDE_TOPICS: Map<String, String> = linkedMapOf(
           clijvm profile --wait "Gradle Test Executor" --duration 30s
 
         Check in this order:
-          1. UI idle-waiting: an idle-wait hint, or waits stacks in waitForIdle /
+          1. UI idle-waiting: an idle-wait hint, or wait stacks in waitForIdle /
              Espresso idling. A long or infinite animation keeps the UI non-idle, so
              every waitForIdle burns its full timeout. Disable animations in tests;
              check rememberInfiniteTransition and repeating animators.
