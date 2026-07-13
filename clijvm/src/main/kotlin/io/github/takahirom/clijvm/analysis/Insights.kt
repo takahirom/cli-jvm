@@ -62,6 +62,21 @@ object InsightRules {
     /** Self% share of hot methods above which a workload signature is worth flagging. */
     const val HOTSPOT_SHARE_PCT = 5.0
 
+    /**
+     * Allocation sites sampled from fewer than this many events carry a low-confidence caveat: the
+     * extrapolated byte figure rests on too few samples to trust. Shared with the renderer.
+     */
+    const val LOW_ALLOCATION_CONFIDENCE_EVENTS = 5
+
+    /** Matches kotlinx.coroutines debug-mode thread names such as "DefaultDispatcher-worker-1 @coroutine#7". */
+    private val COROUTINE_DEBUG_THREAD_REGEX = Regex("""@coroutine#\d+""")
+
+    /** Class/frame markers of the CoroutineId that debug mode threads through allocations. */
+    private val COROUTINE_ID_MARKERS = listOf("kotlinx.coroutines.CoroutineId", "CoroutineId")
+
+    /** Frame markers of Robolectric native-runtime font copying (done per sandbox creation). */
+    private val FONT_COPY_MARKERS = listOf("maybeCopyFonts", "DefaultNativeRuntimeLoader")
+
     fun derive(result: ProfileResult): Insights {
         val warnings = mutableListOf<String>()
         val hints = mutableListOf<String>()
@@ -76,6 +91,16 @@ object InsightRules {
                 "statistically noisy. Increase --duration for stabler hotspots."
         } else if (result.totalSamples == 0) {
             warnings += "No CPU samples were captured; hotspot data is unavailable."
+        }
+
+        // The headline allocation site is the one a reader trusts most; warn when it rests on too
+        // few sampled events for its extrapolated byte figure to be reliable.
+        result.allocation?.topSites?.firstOrNull()?.let { top ->
+            if (top.events < LOW_ALLOCATION_CONFIDENCE_EVENTS) {
+                val unit = if (top.events == 1) "event" else "events"
+                warnings += "Top allocation site is extrapolated from only ${top.events} sampled $unit; " +
+                    "treat its byte figure as rough."
+            }
         }
 
         val gcShare = if (result.durationMs > 0) result.gc.totalPauseMs / result.durationMs else 0.0
@@ -135,6 +160,27 @@ object InsightRules {
         if (sandboxInAllocation) {
             hints += "Robolectric sandbox class loading appears in allocation hot paths; sandbox setup " +
                 "may dominate. Check @Config sdk spread (each SDK level rebuilds its own sandbox)."
+        }
+
+        // --- Robolectric native-runtime font copying (from allocation hot paths) ---
+        val fontCopyInAllocation = result.allocation?.topSites.orEmpty().any { site ->
+            site.stack.any { frame -> FONT_COPY_MARKERS.any { frame.contains(it) } }
+        }
+        if (fontCopyInAllocation) {
+            hints += "Robolectric native runtime font copying appears in allocation hot paths " +
+                "(maybeCopyFonts); fonts are copied per sandbox creation — reducing sandbox rebuilds " +
+                "(@Config spread) avoids it."
+        }
+
+        // --- kotlinx.coroutines debug mode (thread names carry @coroutine#N, or CoroutineId allocs) ---
+        val coroutineDebugByThread = result.hotThreads.any { COROUTINE_DEBUG_THREAD_REGEX.containsMatchIn(it.name) }
+        val coroutineDebugByAllocation = result.allocation?.topSites.orEmpty().any { site ->
+            COROUTINE_ID_MARKERS.any { m -> site.className.contains(m) || site.stack.any { it.contains(m) } }
+        }
+        if (coroutineDebugByThread || coroutineDebugByAllocation) {
+            hints += "kotlinx.coroutines debug mode appears to be on (thread names carry @coroutine#N; " +
+                "auto-enabled by -ea in test workers). It adds allocation and thread-name overhead; " +
+                "consider -Dkotlinx.coroutines.debug=off."
         }
 
         // --- multiple Android SDK worker threads ---
@@ -201,7 +247,10 @@ object InsightRules {
 
         // --- significant non-CPU (wait/park/sleep) time ---
         result.waits?.let { waits ->
-            val maxThreadWaitMs = waits.threads.maxOfOrNull { it.totalMs } ?: 0.0
+            // Ignore housekeeping/idle-worker threads so a parked Cleaner doesn't look like a bottleneck.
+            val maxThreadWaitMs = waits.threads
+                .filterNot { OffCpuNoise.isSuppressed(it) }
+                .maxOfOrNull { it.totalMs } ?: 0.0
             // Flag when at least one thread spent half the recording parked/waiting.
             if (result.durationMs > 0 && maxThreadWaitMs >= 0.5 * result.durationMs) {
                 hints += String.format(
@@ -256,7 +305,11 @@ object InsightRules {
         if (result.durationMs <= 0) return false
         val samplesPerSec = result.totalSamples / (result.durationMs / 1000.0)
         val waits = result.waits ?: return false
-        val maxThreadWaitMs = waits.threads.maxOfOrNull { it.totalMs } ?: 0.0
+        // Only real (non-housekeeping/idle) threads count toward the trigger, otherwise a JVM whose
+        // Cleaner/Finalizer parks for the whole run looks off-CPU-dominated when nothing waits.
+        val maxThreadWaitMs = waits.threads
+            .filterNot { OffCpuNoise.isSuppressed(it) }
+            .maxOfOrNull { it.totalMs } ?: 0.0
         return samplesPerSec < IDLE_SAMPLES_PER_SEC && maxThreadWaitMs >= 0.5 * result.durationMs
     }
 
